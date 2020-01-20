@@ -103,6 +103,10 @@ exports.saveResolvedNodes = async (nodeTypeNames, resolver) => {
   }
 }
 
+const getResolvedNodesCache = () => store.getState().resolvedNodesCache
+
+exports.getResolvedNodesCache = getResolvedNodesCache
+
 /**
  * Get node and save path dependency.
  *
@@ -154,3 +158,93 @@ const addResolvedNodes = (typeName, arr) => {
 }
 
 exports.addResolvedNodes = addResolvedNodes
+
+// TODO: This local cache is "global" to the nodejs instance. It should be
+//       reset after each point where nodes are mutated. This is currently
+//       not the case. I don't think we want to persist this cache in redux.
+//       (This works currently fine for a `build`, but won't for `develop`)
+let mappedByKey
+
+const ensureIndexByTypedChain = (chain, nodeTypeNames) => {
+  const chained = chain.join(`+`)
+
+  if (!mappedByKey) {
+    mappedByKey = new Map()
+  }
+
+  const nodeTypeNamePrefix = nodeTypeNames.join(`,`) + `/`
+  // The format of the typedKey is `type,type/path+to+eqobj`
+  const typedKey = nodeTypeNamePrefix + chained
+
+  let byKeyValue = mappedByKey.get(typedKey)
+  if (byKeyValue) {
+    return
+  }
+
+  const { nodes, resolvedNodesCache } = store.getState()
+
+  byKeyValue = new Map() // Map<node.value, Set<all nodes with this value for this key>>
+  mappedByKey.set(typedKey, byKeyValue)
+
+  // TODO: Is it faster to loop through the maps by type instead of all nodes?
+  // TODO: Are filters generally interested in internal artifact nodes that are is not related to a page?
+  nodes.forEach(node => {
+    if (!nodeTypeNames.includes(node.internal.type)) {
+      return
+    }
+
+    // There can be a filter that targets `__gatsby_resolved`
+    if (!node.__gatsby_resolved) {
+      const typeName = node.internal.type
+      const resolvedNodes = resolvedNodesCache.get(typeName)
+      node.__gatsby_resolved = resolvedNodes?.get(node.id)
+    }
+
+    let v = node
+    let i = 0
+    while (i < chain.length && v) {
+      const nextProp = chain[i++]
+      v = v[nextProp]
+    }
+
+    if (
+      (typeof v !== `string` &&
+        typeof v !== `number` &&
+        typeof v !== `boolean`) ||
+      i !== chain.length
+    ) {
+      // Not sure whether this is supposed to happen, but this means that either
+      // - The node chain ended with `undefined`, or
+      // - The node chain ended in something other than a primitive, or
+      // - A part in the chain in the object was not an object
+      return
+    }
+
+    // Special case `id` as that bucket never receives more than one element
+    if (chained === `id`) {
+      // Note: this is not a duplicate from `nodes` because this set only
+      //       contains nodes of this type. Page nodes are a subset of all nodes
+      byKeyValue.set(v, node)
+    } else {
+      let set = byKeyValue.get(v)
+      if (!set) {
+        set = new Set()
+        byKeyValue.set(v, set)
+      }
+      set.add(node)
+    }
+  })
+}
+
+exports.ensureIndexByTypedChain = ensureIndexByTypedChain
+
+const getNodesByTypedChain = (chain, value, nodeTypeNames) => {
+  const key = chain.join(`+`)
+
+  const typedKey = nodeTypeNames.join(`,`) + `/` + key
+
+  let byTypedKey = mappedByKey?.get(typedKey)
+  return byTypedKey?.get(value)
+}
+
+exports.getNodesByTypedChain = getNodesByTypedChain
